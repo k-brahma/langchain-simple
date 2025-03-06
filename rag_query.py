@@ -1,170 +1,180 @@
+"""
+rag_query.py
+
+このスクリプトは、RAG（Retrieval-Augmented Generation）システムを使用して
+ユーザーからの質問に回答します。
+
+主な機能:
+- ベクトルストアからの情報検索
+- 質問応答チェーンの実行
+- インタラクティブモードでのユーザー対話
+- コマンドライン引数による単一質問への回答
+"""
+
 import argparse
 import os
+import sys
+import traceback
 
 from dotenv import load_dotenv
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.prompts import ChatPromptTemplate
 
-# 埋め込みモジュールをインポート
-# from langchain_cohere import CohereEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-
-# from langchain_openai import OpenAIEmbeddings
+# 共通ユーティリティをインポート
+from rag_utils import create_rag_chain, load_vector_store, print_document_sources, query_rag
 
 # 環境変数を読み込む
 load_dotenv()
 
-# ベクトルストアの保存先
-PERSIST_DIRECTORY = "vectorstore"
-
-# 埋め込みプロバイダーと設定
-EMBEDDING_PROVIDER = "cohere"
-COHERE_EMBEDDING_MODEL = "embed-multilingual-v3.0"
-
-
-def load_vector_store():
-    """保存されたベクトルストアを読み込む"""
-    try:
-        # 環境変数の読み込み
-        load_dotenv()
-
-        # ベクトルストアの保存先ディレクトリ
-        persist_directory = "chroma_db"
-
-        # ディレクトリの存在確認
-        if not os.path.exists(persist_directory):
-            print(f"エラー: ベクトルストア '{persist_directory}' が見つかりません。")
-            print("rag_generator.pyを先に実行して、ベクトルストアを生成してください。")
-            return None
-
-        # OpenAIの埋め込みを初期化
-        embeddings = OpenAIEmbeddings()
-
-        vector_store = Chroma(persist_directory=persist_directory, embedding_function=embeddings)
-        return vector_store
-    except Exception as e:
-        print(f"ベクトルストア読み込み中にエラーが発生しました: {e}")
-        return None
-
-
-def create_rag_chain(vector_store):
-    """RAGチェーンを作成する関数"""
-    # リトリーバーの作成
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-
-    # LLMを初期化 (temperature=0で決定論的な回答に)
-    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
-
-    # プロンプトテンプレートを作成
-    prompt = ChatPromptTemplate.from_template(
-        """以下の情報をもとに質問に日本語で回答してください。
-        与えられた情報に基づいた回答のみを行い、情報がない場合は「提供された情報からは回答できません」と答えてください。
-
-        コンテキスト:
-        {context}
-
-        質問: {question}
-        """
-    )
-
-    # ドキュメント結合チェーンの作成
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
-
-    # 最終的なRAGチェーンの作成
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-    return rag_chain
-
-
-def query_rag(rag_chain, query):
-    """RAGチェーンで問い合わせを実行する関数"""
-    response = rag_chain.invoke({"question": query})
-    return response
-
-
-def print_document_sources(response):
-    """参照ドキュメントのソースを表示する関数"""
-    source_documents = response.get("context", [])
-    if source_documents:
-        print("\n参照ドキュメント:")
-        sources = set()
-        for doc in source_documents:
-            source = doc.metadata.get("source", "不明")
-            sources.add(source)
-
-        for source in sources:
-            print(f"  - {source}")
-    else:
-        print("\n参照ドキュメントはありません")
-
 
 def interactive_mode():
-    """インタラクティブモード（対話型）の関数"""
+    """
+    インタラクティブモードでRAGシステムを実行する関数。
+
+    ユーザーからの質問を受け付け、RAGシステムを使用して回答します。
+    'exit'または'quit'と入力されるまで繰り返し質問を受け付けます。
+    """
+    print("\nRAGシステム インタラクティブモード")
+    print("質問を入力してください。終了するには 'exit' または 'quit' と入力してください。")
+
     # ベクトルストアを読み込む
     vector_store = load_vector_store()
     if not vector_store:
+        print("ベクトルストアの読み込みに失敗しました。終了します。")
         return
 
     # RAGチェーンを作成
-    rag_chain = create_rag_chain(vector_store)
+    try:
+        rag_chain = create_rag_chain(vector_store)
+    except Exception as e:
+        print(f"RAGチェーンの作成に失敗しました: {str(e)}")
+        traceback.print_exc()
+        return
 
-    print("\nRAGシステムの対話モードを開始します（終了するには 'exit' または 'quit' と入力）")
-    print("質問を入力してください:")
-
+    # インタラクティブループ
     while True:
-        user_input = input("\n> ")
-        user_input = user_input.strip()
-
-        if user_input.lower() in ["exit", "quit", "終了"]:
-            print("対話モードを終了します。")
-            break
-
-        if not user_input:
-            continue
-
         try:
-            print("問い合わせ中...")
-            response = query_rag(rag_chain, user_input)
-            print(f"\n回答: {response['answer']}")
-            print_document_sources(response)
+            # ユーザーからの入力を受け付ける
+            query = input("\n質問> ")
+
+            # 終了コマンドのチェック
+            if query.lower() in ["exit", "quit"]:
+                print("インタラクティブモードを終了します。")
+                break
+
+            # 空の入力をスキップ
+            if not query.strip():
+                print("質問を入力してください。")
+                continue
+
+            # RAGチェーンに問い合わせ
+            try:
+                response = query_rag(rag_chain, query)
+
+                # レスポンスの構造を確認（デバッグ用）
+                print("\nレスポンスキー:", response.keys())
+
+                # 回答を表示
+                if "answer" in response:
+                    print("\n回答:", response["answer"])
+                elif "result" in response:
+                    print("\n回答:", response["result"])
+                else:
+                    print("\n回答: レスポンス形式が認識できません。")
+
+                # 参照ドキュメントを表示
+                print_document_sources(response)
+
+            except Exception as e:
+                print(f"エラーが発生しました: {str(e)}")
+                traceback.print_exc()
+
+        except KeyboardInterrupt:
+            print("\nインタラクティブモードを終了します。")
+            break
         except Exception as e:
-            print(f"エラーが発生しました: {e}")
+            print(f"予期しないエラーが発生しました: {str(e)}")
+            traceback.print_exc()
 
 
 def single_query(query):
-    """単一の問い合わせを実行する関数"""
+    """
+    単一の質問に対してRAGシステムを実行する関数。
+
+    パラメータ:
+        query (str): 処理する質問。
+
+    戻り値:
+        bool: 処理が成功した場合はTrue、失敗した場合はFalse。
+    """
+    print(f"質問: {query}")
+
+    # ベクトルストアを読み込む
+    vector_store = load_vector_store()
+    if not vector_store:
+        print("ベクトルストアの読み込みに失敗しました。終了します。")
+        return False
+
+    # RAGチェーンを作成
     try:
-        # ベクトルストアを読み込む
-        vector_store = load_vector_store()
-        if not vector_store:
-            return
-
-        # RAGチェーンを作成
         rag_chain = create_rag_chain(vector_store)
+    except Exception as e:
+        print(f"RAGチェーンの作成に失敗しました: {str(e)}")
+        traceback.print_exc()
+        return False
 
-        # 問い合わせを実行
-        print(f"問い合わせ: {query}")
+    # RAGチェーンに問い合わせ
+    try:
         response = query_rag(rag_chain, query)
 
-        # 結果を表示
-        print(f"\n回答: {response['answer']}")
+        # レスポンスの構造を確認（デバッグ用）
+        print("\nレスポンスキー:", response.keys())
+
+        # 回答を表示
+        if "answer" in response:
+            print("\n回答:", response["answer"])
+        elif "result" in response:
+            print("\n回答:", response["result"])
+        else:
+            print("\n回答: レスポンス形式が認識できません。")
+
+        # 参照ドキュメントを表示
         print_document_sources(response)
+
+        return True
     except Exception as e:
-        print(f"エラーが発生しました: {e}")
+        print(f"エラーが発生しました: {str(e)}")
+        traceback.print_exc()
+        return False
 
 
 def main():
-    """メイン関数"""
-    parser = argparse.ArgumentParser(description="RAGシステムへの問い合わせ")
-    parser.add_argument("-q", "--query", help="単一の問い合わせを実行する")
+    """
+    メイン関数。
+
+    コマンドライン引数を解析し、適切なモードでRAGシステムを実行します。
+    引数が指定されていない場合はインタラクティブモードで実行します。
+    """
+    parser = argparse.ArgumentParser(description="RAGシステムを使用して質問に回答します。")
+    parser.add_argument(
+        "--query",
+        "-q",
+        type=str,
+        help="回答する質問。指定しない場合はインタラクティブモードで実行します。",
+    )
     args = parser.parse_args()
 
-    if args.query:
-        single_query(args.query)
-    else:
-        interactive_mode()
+    try:
+        if args.query:
+            # 単一の質問に回答
+            success = single_query(args.query)
+            sys.exit(0 if success else 1)
+        else:
+            # インタラクティブモード
+            interactive_mode()
+            sys.exit(0)
+    except Exception as e:
+        print(f"予期しないエラーが発生しました: {str(e)}")
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

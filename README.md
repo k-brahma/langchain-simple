@@ -1,99 +1,94 @@
-# HTML RAGシステム
+# LangChain RAGシステム
 
-このプロジェクトは、HTMLファイルをベースにしたRAG（Retrieval Augmented Generation）システムを構築します。  
-`rag_base_data/html`ディレクトリ内のHTMLファイルを読み込み、ベクトルストアを作成し、質問応答システムを提供します。
+このプロジェクトは、LangChainを使用したシンプルなRAG（Retrieval-Augmented Generation）システムを実装しています。HTMLファイルからテキストを抽出し、ベクトルデータベースに保存して、ユーザーの質問に対して関連情報を検索し回答を生成します。
 
 ## 機能
 
-- HTMLファイルの読み込みと処理
-- テキストのチャンク分割
-- OpenAI埋め込みによるベクトル化とChromaベクトルストアへの保存
-- OpenAI GPTモデルを使用した質問応答
-- コマンドライン対話インターフェース
+- HTMLファイルからのテキスト抽出
+- テキストのチャンク分割と埋め込み
+- Chromaベクトルデータベースへの保存
+- 質問応答システム（コマンドライン、インタラクティブモード、APIサーバー）
+- トークン使用量の追跡と統計情報の記録
+
+## ファイル構成
+
+- `rag_utils.py`: 共通ユーティリティ関数（HTMLローダー、ドキュメント分割、ベクトルストア操作など）
+- `rag_generator.py`: ベクトルストア生成スクリプト
+- `rag_query.py`: 質問応答スクリプト（コマンドラインとインタラクティブモード）
+- `api.py`: FastAPIを使用したAPIサーバー
+- `requirements.txt`: 依存パッケージリスト
 
 ## セットアップ
 
-1. 必要なライブラリをインストールします：
+1. 依存パッケージのインストール:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. 環境変数を設定します：
+2. 環境変数の設定:
 
-このリポジトリには`.env_sample`ファイルが含まれています。以下の手順で環境変数を設定してください：
-
-**Windowsの場合:**
-```bash
-copy .env_sample .env
-```
-
-**macOS/Linuxの場合:**
-```bash
-cp .env_sample .env
-```
-
-3. `.env`ファイルをテキストエディタで開き、OpenAI APIキーを設定します：
+`.env`ファイルを作成し、以下の内容を記述します:
 
 ```
-# .envファイルの中身
-OPENAI_API_KEY=sk-あなたのAPIキーをここに入力してください
+OPENAI_API_KEY=your_openai_api_key
 ```
 
-> **OpenAI APIキーの取得方法:**
-> 1. [OpenAIのウェブサイト](https://platform.openai.com/)にアクセスしてアカウントを作成またはログインします
-> 2. 右上のプロフィールアイコンをクリックし、「API keys」を選択します
-> 3. 「Create new secret key」ボタンをクリックして新しいAPIキーを作成します
-> 4. 作成されたキーをコピーして`.env`ファイルに貼り付けます（このキーは一度しか表示されないので注意してください）
+3. HTMLデータの準備:
+
+`rag_base_data/html/`ディレクトリにHTMLファイルを配置します。
 
 ## 使用方法
 
-このシステムは2つの独立したスクリプトで構成されています：
-
-1. `rag_generator.py` - HTMLファイルからベクトルストアを生成するスクリプト
-2. `rag_query.py` - 生成されたベクトルストアに対して問い合わせを行うスクリプト
-
-### 1. ベクトルストアの生成
-
-まず、HTMLファイルをロードしてベクトルストアを作成します：
+### ベクトルストアの生成
 
 ```bash
 python rag_generator.py
 ```
 
-このスクリプトは、HTMLファイルを読み込み、テキストを抽出し、チャンクに分割してベクトル化し、`chroma_db`ディレクトリに保存します。
-
-### 2. RAGシステムへの問い合わせ
-
-ベクトルストアが作成された後、以下のコマンドで問い合わせを行うことができます：
+### 質問応答（コマンドライン）
 
 ```bash
-# 対話モード
+python rag_query.py --query "あなたの質問"
+```
+
+### 質問応答（インタラクティブモード）
+
+```bash
 python rag_query.py
-
-# コマンドラインで直接質問
-python rag_query.py -q "LangChainとは何ですか？"
 ```
 
-対話モードでは、複数の質問を連続して入力できます。終了するには「exit」または「quit」と入力します。
+### APIサーバーの起動
 
-## よくあるエラーと解決方法
-
-### APIキー関連のエラー
-
-```
-Error: OpenAI API key not found. Please set the OPENAI_API_KEY environment variable.
+```bash
+python api.py
 ```
 
-**解決方法:** `.env`ファイルが正しく作成され、有効なAPIキーが設定されていることを確認してください。
+APIサーバーは`http://localhost:8000`で起動し、以下のエンドポイントを提供します:
 
-### ベクトルストアが見つからないエラー
+- `GET /health`: ヘルスチェック
+- `POST /query`: 質問応答API
+- `GET /docs`: Swagger UIによるAPIドキュメント
 
+## APIの使用例
+
+```bash
+curl -X POST "http://localhost:8000/query" \
+     -H "Content-Type: application/json" \
+     -d '{"query": "あなたの質問"}'
 ```
-Error: Vector store not found. Please run rag_generator.py first.
-```
 
-**解決方法:** 先に`python rag_generator.py`を実行して、ベクトルストアを生成してください。
+## ディレクトリ構造
+
+- `chroma_db/`: ベクトルストアデータ
+- `rag_base_data/html/`: HTMLソースファイル
+- `stats/`: トークン使用量統計情報
+
+## 注意事項
+
+- OpenAI APIキーが必要です
+- HTMLファイルは`rag_base_data/html/`ディレクトリに配置する必要があります
+- ベクトルストアは`chroma_db/`ディレクトリに保存されます
 
 ## プロジェクト構造
 
