@@ -1,180 +1,186 @@
 """
 rag_query.py
 
-このスクリプトは、RAG（Retrieval-Augmented Generation）システムを使用して
-ユーザーからの質問に回答します。
-
-主な機能:
-- ベクトルストアからの情報検索
-- 質問応答チェーンの実行
-- インタラクティブモードでのユーザー対話
-- コマンドライン引数による単一質問への回答
+このスクリプトは、RAG（Retrieval-Augmented Generation）システムを使用して、
+ユーザーの質問に回答するためのインターフェースを提供します。
+コマンドラインから単一の質問に回答する機能と、対話モードでの質問応答機能を提供します。
 """
 
 import argparse
-import os
 import sys
-import traceback
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 
-# 共通ユーティリティをインポート
-from rag_utils import create_rag_chain, load_vector_store, print_document_sources, query_rag
+from config import (
+    get_embedding_provider,
+    get_llm_provider,
+    set_embedding_provider,
+    set_llm_provider,
+)
+from rag_utils import create_rag_chain
 
 # 環境変数を読み込む
 load_dotenv()
 
 
+def print_document_sources(response):
+    """
+    レスポンスからドキュメントソースを抽出して表示します。
+
+    Args:
+        response (dict): RAGチェーンからのレスポンス
+    """
+    sources = []
+    if "context" in response and response["context"]:
+        for doc in response["context"]:
+            if "source" in doc.metadata:
+                sources.append(doc.metadata["source"])
+
+    if sources:
+        print("\n参照ドキュメント:")
+        for source in set(sources):
+            print(f"  - {source}")
+
+
 def interactive_mode():
     """
-    インタラクティブモードでRAGシステムを実行する関数。
-
-    ユーザーからの質問を受け付け、RAGシステムを使用して回答します。
-    'exit'または'quit'と入力されるまで繰り返し質問を受け付けます。
+    対話モードで質問応答を行います。
+    ユーザーからの入力を受け取り、RAGシステムを使用して回答を生成します。
+    'exit'または'quit'と入力されるまで続けます。
     """
-    print("\nRAGシステム インタラクティブモード")
+    print("RAGシステム対話モードを開始します")
     print("質問を入力してください。終了するには 'exit' または 'quit' と入力してください。")
 
-    # ベクトルストアを読み込む
-    vector_store = load_vector_store()
-    if not vector_store:
-        print("ベクトルストアの読み込みに失敗しました。終了します。")
-        return
-
-    # RAGチェーンを作成
     try:
-        rag_chain = create_rag_chain(vector_store)
-    except Exception as e:
-        print(f"RAGチェーンの作成に失敗しました: {str(e)}")
-        traceback.print_exc()
-        return
+        # 埋め込みプロバイダーとLLMプロバイダーを取得
+        embedding_provider = get_embedding_provider()
+        llm_provider = get_llm_provider()
+        print(f"使用する埋め込みプロバイダー: {embedding_provider}")
+        print(f"使用するLLMプロバイダー: {llm_provider}")
 
-    # インタラクティブループ
-    while True:
-        try:
-            # ユーザーからの入力を受け付ける
-            query = input("\n質問> ")
+        # RAGチェーンを作成
+        rag_chain = create_rag_chain(embedding_provider, llm_provider)
+        if not rag_chain:
+            print("RAGチェーンの作成に失敗しました。終了します。")
+            return
 
-            # 終了コマンドのチェック
-            if query.lower() in ["exit", "quit"]:
-                print("インタラクティブモードを終了します。")
+        while True:
+            # ユーザー入力を取得
+            user_input = input("\n質問を入力してください: ")
+
+            # 終了コマンドをチェック
+            if user_input.lower() in ["exit", "quit", "終了"]:
+                print("対話モードを終了します。")
                 break
 
             # 空の入力をスキップ
-            if not query.strip():
-                print("質問を入力してください。")
+            if not user_input.strip():
                 continue
 
-            # RAGチェーンに問い合わせ
             try:
-                response = query_rag(rag_chain, query)
-
-                # レスポンスの構造を確認（デバッグ用）
-                print("\nレスポンスキー:", response.keys())
+                # RAGチェーンに問い合わせ
+                result = rag_chain.invoke({"input": user_input})
+                print(f"生のレスポンス: {result}")
 
                 # 回答を表示
-                if "answer" in response:
-                    print("\n回答:", response["answer"])
-                elif "result" in response:
-                    print("\n回答:", response["result"])
+                if "answer" in result:
+                    print("\n回答:", result["answer"])
                 else:
-                    print("\n回答: レスポンス形式が認識できません。")
+                    print("\n回答を生成できませんでした。")
 
-                # 参照ドキュメントを表示
-                print_document_sources(response)
+                # ドキュメントソースを表示
+                print_document_sources(result)
 
             except Exception as e:
-                print(f"エラーが発生しました: {str(e)}")
+                print(f"エラーが発生しました: {e}")
+                import traceback
+
                 traceback.print_exc()
 
-        except KeyboardInterrupt:
-            print("\nインタラクティブモードを終了します。")
-            break
-        except Exception as e:
-            print(f"予期しないエラーが発生しました: {str(e)}")
-            traceback.print_exc()
+    except KeyboardInterrupt:
+        print("\n対話モードを終了します。")
+    except Exception as e:
+        print(f"予期しないエラーが発生しました: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 def single_query(query):
     """
-    単一の質問に対してRAGシステムを実行する関数。
+    単一の質問に回答します。
 
-    パラメータ:
-        query (str): 処理する質問。
-
-    戻り値:
-        bool: 処理が成功した場合はTrue、失敗した場合はFalse。
+    Args:
+        query (str): 質問文字列
     """
     print(f"質問: {query}")
 
-    # ベクトルストアを読み込む
-    vector_store = load_vector_store()
-    if not vector_store:
-        print("ベクトルストアの読み込みに失敗しました。終了します。")
-        return False
-
-    # RAGチェーンを作成
     try:
-        rag_chain = create_rag_chain(vector_store)
-    except Exception as e:
-        print(f"RAGチェーンの作成に失敗しました: {str(e)}")
-        traceback.print_exc()
-        return False
+        # 埋め込みプロバイダーとLLMプロバイダーを取得
+        embedding_provider = get_embedding_provider()
+        llm_provider = get_llm_provider()
+        print(f"使用する埋め込みプロバイダー: {embedding_provider}")
+        print(f"使用するLLMプロバイダー: {llm_provider}")
 
-    # RAGチェーンに問い合わせ
-    try:
-        response = query_rag(rag_chain, query)
+        # RAGチェーンを作成
+        rag_chain = create_rag_chain(embedding_provider, llm_provider)
+        if not rag_chain:
+            print("RAGチェーンの作成に失敗しました。終了します。")
+            return
 
-        # レスポンスの構造を確認（デバッグ用）
-        print("\nレスポンスキー:", response.keys())
+        # RAGチェーンに問い合わせ
+        result = rag_chain.invoke({"input": query})
+        print(f"生のレスポンス: {result}")
 
         # 回答を表示
-        if "answer" in response:
-            print("\n回答:", response["answer"])
-        elif "result" in response:
-            print("\n回答:", response["result"])
+        if "answer" in result:
+            print("\n回答:", result["answer"])
         else:
-            print("\n回答: レスポンス形式が認識できません。")
+            print("\n回答を生成できませんでした。")
 
-        # 参照ドキュメントを表示
-        print_document_sources(response)
+        # ドキュメントソースを表示
+        print_document_sources(result)
 
-        return True
     except Exception as e:
-        print(f"エラーが発生しました: {str(e)}")
+        print(f"エラーが発生しました: {e}")
+        import traceback
+
         traceback.print_exc()
-        return False
 
 
 def main():
-    """
-    メイン関数。
-
-    コマンドライン引数を解析し、適切なモードでRAGシステムを実行します。
-    引数が指定されていない場合はインタラクティブモードで実行します。
-    """
-    parser = argparse.ArgumentParser(description="RAGシステムを使用して質問に回答します。")
+    """メイン関数"""
+    parser = argparse.ArgumentParser(description="RAGシステムを使用した質問応答")
     parser.add_argument(
-        "--query",
-        "-q",
+        "--query", type=str, help="回答する質問。指定しない場合は対話モードで実行します。"
+    )
+    parser.add_argument(
+        "--embedding_provider",
         type=str,
-        help="回答する質問。指定しない場合はインタラクティブモードで実行します。",
+        default=get_embedding_provider(),
+        choices=["openai", "cohere"],
+        help="埋め込みプロバイダー (openai または cohere)",
+    )
+    parser.add_argument(
+        "--llm_provider",
+        type=str,
+        default=get_llm_provider(),
+        choices=["openai"],
+        help="LLMプロバイダー (現在は openai のみサポート)",
     )
     args = parser.parse_args()
 
-    try:
-        if args.query:
-            # 単一の質問に回答
-            success = single_query(args.query)
-            sys.exit(0 if success else 1)
-        else:
-            # インタラクティブモード
-            interactive_mode()
-            sys.exit(0)
-    except Exception as e:
-        print(f"予期しないエラーが発生しました: {str(e)}")
-        traceback.print_exc()
-        sys.exit(1)
+    # 埋め込みプロバイダーとLLMプロバイダーを設定
+    set_embedding_provider(args.embedding_provider)
+    set_llm_provider(args.llm_provider)
+
+    if args.query:
+        # 単一の質問に回答
+        single_query(args.query)
+    else:
+        # 対話モードで実行
+        interactive_mode()
 
 
 if __name__ == "__main__":

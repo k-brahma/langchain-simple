@@ -25,14 +25,24 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.schema.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
+from langchain_cohere import CohereEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
+# 設定を読み込む
+from config import (
+    CHROMA_DIRECTORY,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    HTML_DATA_DIRECTORY,
+    get_embedding_provider,
+    get_llm_provider,
+)
 
 # 環境変数を読み込む
 load_dotenv()
 
-# ディレクトリ設定
-CHROMA_DIRECTORY = "chroma_db"
-HTML_DATA_DIRECTORY = "rag_base_data/html"
+# 埋め込みプロバイダーの設定
+DEFAULT_EMBEDDING_PROVIDER = "openai"  # "openai" または "cohere"
 
 
 class CustomHTMLLoader:
@@ -100,63 +110,33 @@ class CustomHTMLLoader:
             return []
 
 
-def load_html_files():
+def load_html_files(html_files=None):
     """
-    HTMLファイルを読み込む関数。
+    HTMLファイルを読み込み、ドキュメントのリストを返します。
 
-    指定されたディレクトリ内のすべてのHTMLファイルを検出し、
-    各ファイルをCustomHTMLLoaderを使用して読み込みます。
-    読み込まれたドキュメントはリストとして返されます。
+    Args:
+        html_files (list, optional): 読み込むHTMLファイルのパスのリスト。
+            指定されない場合は、HTML_DATA_DIRECTORYから全てのHTMLファイルを読み込みます。
 
-    戻り値:
-        list: 読み込まれたDocumentオブジェクトのリスト。
+    Returns:
+        list: Documentオブジェクトのリスト
     """
-    html_files = glob.glob(f"{HTML_DATA_DIRECTORY}/*.html")
-    print(f"検出されたHTMLファイル数: {len(html_files)}")
-    print(f"検出されたファイルリスト: {', '.join(html_files)}")
-    all_documents = []
+    if html_files is None:
+        # ディレクトリ内の全てのHTMLファイルを取得
+        html_files = glob.glob(os.path.join(HTML_DATA_DIRECTORY, "*.html"))
 
-    if not html_files:
-        print("HTMLファイルが見つかりませんでした。ディレクトリパスを確認してください。")
-        print(f"現在の作業ディレクトリ: {os.getcwd()}")
-        print(
-            f"ディレクトリ内容: {os.listdir(HTML_DATA_DIRECTORY) if os.path.exists(HTML_DATA_DIRECTORY) else '存在しません'}"
-        )
-        return all_documents
-
+    documents = []
     for file_path in html_files:
-        try:
-            print(f"処理開始: {file_path}")
-            # カスタムHTMLローダーを使用
-            loader = CustomHTMLLoader(file_path)
-            documents = loader.load()
-
-            if not documents:
-                print(f"ファイルからドキュメントを抽出できませんでした: {file_path}")
-                continue
-
-            # ファイル名をメタデータに追加
-            file_name = os.path.basename(file_path)
-            for doc in documents:
-                doc.metadata["source"] = file_name
-                # ドキュメントの内容の一部をログに出力
-                content_preview = (
-                    doc.page_content[:100] + "..."
-                    if len(doc.page_content) > 100
-                    else doc.page_content
-                )
-                print(f"抽出されたコンテンツ (先頭100文字): {content_preview}")
-
-            all_documents.extend(documents)
+        print(f"処理開始: {file_path}")
+        loader = CustomHTMLLoader(file_path)
+        doc = loader.load()
+        if doc:
+            documents.extend(doc)
             print(
-                f"読み込み完了: {file_name} から {len(documents)} 件のドキュメントを読み込みました"
+                f"読み込み完了: {os.path.basename(file_path)} から {len(doc)} 件のドキュメントを読み込みました"
             )
-        except Exception as e:
-            print(f"ファイル読み込みエラー: {file_path} - {str(e)}")
-            traceback.print_exc()
 
-    print(f"合計 {len(all_documents)} 件のドキュメントを読み込みました")
-    return all_documents
+    return documents
 
 
 def split_documents(documents):
@@ -191,145 +171,173 @@ def split_documents(documents):
     return chunks
 
 
-def create_vector_store(chunks):
+def create_embeddings(embedding_provider=None):
     """
-    ベクトルストアを作成する関数。
+    埋め込みモデルを作成する関数。
 
-    指定されたチャンクを使用して、Chromaベクトルストアを作成し、
-    指定されたディレクトリに保存します。
+    指定された埋め込みプロバイダーに基づいて、適切な埋め込みモデルを作成します。
 
     パラメータ:
-        chunks (list): ベクトルストアに追加するチャンクのリスト。
+        embedding_provider (str, optional): 使用する埋め込みプロバイダー。
+            "openai"または"cohere"を指定できます。
+            Noneの場合は、get_embedding_provider()の値を使用します。
 
     戻り値:
-        Chroma: 作成されたベクトルストアオブジェクト。
+        Embeddings: 作成された埋め込みモデル。
+    """
+    if embedding_provider is None:
+        embedding_provider = get_embedding_provider()
+
+    print(f"{embedding_provider}埋め込みを初期化中...")
+
+    if embedding_provider == "openai":
+        # OpenAI埋め込みを使用
+        embeddings = OpenAIEmbeddings()
+    elif embedding_provider == "cohere":
+        # Cohere埋め込みを使用
+        try:
+            # まず、シンプルな初期化を試みる
+            embeddings = CohereEmbeddings(
+                cohere_api_key=os.getenv("COHERE_API_KEY"),
+                model="embed-multilingual-v3.0",  # モデルを指定
+            )
+        except TypeError:
+            # 引数が足りない場合は、client, async_clientを追加
+            embeddings = CohereEmbeddings(
+                cohere_api_key=os.getenv("COHERE_API_KEY"),
+                model="embed-multilingual-v3.0",  # モデルを指定
+                client=None,
+                async_client=None,
+            )
+    else:
+        raise ValueError(f"サポートされていない埋め込みプロバイダー: {embedding_provider}")
+
+    return embeddings
+
+
+def create_vector_store(chunks, embedding_provider=None):
+    """
+    チャンクからベクトルストアを作成します。
+
+    Args:
+        chunks (list): ドキュメントチャンクのリスト
+        embedding_provider (str, optional): 使用する埋め込みプロバイダー
+
+    Returns:
+        Chroma: 作成されたベクトルストア
     """
     print("ベクトルストアの作成を開始します")
 
-    # ディレクトリが存在しない場合は作成
-    if not os.path.exists(CHROMA_DIRECTORY):
-        os.makedirs(CHROMA_DIRECTORY)
-        print(f"ディレクトリを作成しました: {CHROMA_DIRECTORY}")
+    # 埋め込みを作成
+    embeddings = create_embeddings(embedding_provider)
 
-    # OpenAIの埋め込みを使用
-    print("OpenAI埋め込みを初期化中...")
-    embeddings = OpenAIEmbeddings()
-    print("埋め込みの初期化完了")
-
-    # Chromaベクトルストアを作成
+    # ベクトルストアを作成
     print(f"Chromaベクトルストアを作成中... ({len(chunks)} チャンク)")
     vector_store = Chroma.from_documents(
         documents=chunks, embedding=embeddings, persist_directory=CHROMA_DIRECTORY
     )
 
-    # ベクトルストアを保存 - 最新のlangchain-chromaでは不要な場合があります
-    # 最新バージョンではfrom_documentsで自動的に保存されるため
+    # ベクトルストアを保存
     print("ベクトルストアを保存中...")
-    # vector_store.persist()  # 最新バージョンでは不要な場合があります
+    # 最新バージョンではpersist()メソッドが不要な場合があります
+    # vector_store.persist()
     print(f"ベクトルストア作成完了: {CHROMA_DIRECTORY}")
 
     return vector_store
 
 
-def load_vector_store():
+def load_vector_store(embedding_provider=None):
     """
-    保存されたベクトルストアを読み込む関数。
+    保存されたベクトルストアを読み込みます。
 
-    ベクトルストアが存在しない場合はエラーメッセージを表示し、Noneを返します。
-    ベクトルストアが存在する場合は、Chromaオブジェクトを返します。
+    Args:
+        embedding_provider (str, optional): 使用する埋め込みプロバイダー
 
-    戻り値:
-        Chroma: ベクトルストアオブジェクト、またはNone。
+    Returns:
+        Chroma: 読み込まれたベクトルストア
     """
-    try:
-        # 環境変数の読み込み
-        load_dotenv()
-        print("環境変数を読み込みました")
+    print(f"ベクトルストアディレクトリ: {CHROMA_DIRECTORY}")
 
-        # ベクトルストアの保存先ディレクトリ
-        print(f"ベクトルストアディレクトリ: {CHROMA_DIRECTORY}")
-
-        # ディレクトリの存在確認
-        if not os.path.exists(CHROMA_DIRECTORY):
-            print(f"エラー: ベクトルストア '{CHROMA_DIRECTORY}' が見つかりません。")
-            print("rag_generator.pyを先に実行して、ベクトルストアを生成してください。")
-            return None
-
-        print(f"ベクトルストアディレクトリの内容を確認:")
+    # ディレクトリの内容を確認
+    if os.path.exists(CHROMA_DIRECTORY):
+        print("ベクトルストアディレクトリの内容を確認:")
         for item in os.listdir(CHROMA_DIRECTORY):
             print(f"  - {item}")
 
-        # OpenAIの埋め込みを初期化
-        print("OpenAI埋め込みを初期化中...")
-        embeddings = OpenAIEmbeddings()
-        print("埋め込みの初期化完了")
+    # 埋め込みを作成
+    embeddings = create_embeddings(embedding_provider)
 
-        print(f"Chromaベクトルストアを読み込み中...")
-        vector_store = Chroma(persist_directory=CHROMA_DIRECTORY, embedding_function=embeddings)
-        print("ベクトルストアの読み込み完了")
-        return vector_store
-    except Exception as e:
-        print(f"ベクトルストア読み込み中にエラーが発生しました: {e}")
-        print("詳細なエラー情報:")
-        traceback.print_exc()
-        return None
+    # ベクトルストアを読み込む
+    print("Chromaベクトルストアを読み込み中...")
+    vector_store = Chroma(persist_directory=CHROMA_DIRECTORY, embedding_function=embeddings)
+    print("ベクトルストアの読み込み完了")
+
+    return vector_store
 
 
-def create_rag_chain(vector_store):
+def create_rag_chain(embedding_provider=None, llm_provider=None):
     """
-    RAGチェーンを作成する関数。
-
-    指定されたベクトルストアを使用して、RAGチェーンを構築します。
-    チェーンはリトリーバー、LLM、プロンプトテンプレートを含みます。
+    RAGチェーンを作成します。
 
     パラメータ:
-        vector_store (Chroma): 使用するベクトルストア。
+        embedding_provider (str, optional): 使用する埋め込みプロバイダー。
+            Noneの場合は、get_embedding_provider()の値を使用します。
+        llm_provider (str, optional): 使用するLLMプロバイダー。
+            Noneの場合は、get_llm_provider()の値を使用します。
 
     戻り値:
-        RetrievalChain: 構築されたRAGチェーン。
+        Chain: 作成されたRAGチェーン
     """
-    try:
-        print("RAGチェーンの作成を開始します")
-        # リトリーバーの作成
-        print("リトリーバーを作成します")
-        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
-        print("リトリーバーの作成完了")
+    print("RAGチェーンの作成を開始します")
 
-        # LLMを初期化 (temperature=0で決定論的な回答に)
-        print("ChatOpenAIモデルを初期化します")
-        llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-        print("ChatOpenAIモデルの初期化完了")
+    # 埋め込みプロバイダーとLLMプロバイダーを取得
+    if embedding_provider is None:
+        embedding_provider = get_embedding_provider()
+    if llm_provider is None:
+        llm_provider = get_llm_provider()
 
-        # プロンプトテンプレートを作成
-        print("プロンプトテンプレートを作成します")
-        prompt = ChatPromptTemplate.from_template(
-            """以下の情報をもとに質問に日本語で回答してください。
-            与えられた情報に基づいた回答のみを行い、情報がない場合は「提供された情報からは回答できません」と答えてください。
+    # ベクトルストアを読み込む
+    vector_store = load_vector_store(embedding_provider)
+    if vector_store is None:
+        raise ValueError("ベクトルストアの読み込みに失敗しました")
 
-            コンテキスト:
-            {context}
+    # リトリーバーを作成
+    print("リトリーバーを作成します")
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    print("リトリーバーの作成完了")
 
-            質問: {input}
-            """
-        )
-        print("プロンプトテンプレートの作成完了")
+    # LLMを初期化
+    print(f"{llm_provider}モデルを初期化します")
+    llm = ChatOpenAI()
+    print(f"{llm_provider}モデルの初期化完了")
 
-        # ドキュメント結合チェーンの作成
-        print("ドキュメント結合チェーンを作成します")
-        question_answer_chain = create_stuff_documents_chain(llm, prompt)
-        print("ドキュメント結合チェーンの作成完了")
+    # プロンプトテンプレートを作成
+    print("プロンプトテンプレートを作成します")
+    prompt = ChatPromptTemplate.from_template(
+        """
+        あなたは親切なアシスタントです。以下の情報を元に質問に答えてください。
+        
+        コンテキスト情報:
+        {context}
+        
+        質問: {input}
+        
+        回答:
+        """
+    )
+    print("プロンプトテンプレートの作成完了")
 
-        # 最終的なRAGチェーンの作成
-        print("最終的なRAGチェーンを作成します")
-        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-        print("RAGチェーンの作成完了")
+    # ドキュメント結合チェーンを作成
+    print("ドキュメント結合チェーンを作成します")
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    print("ドキュメント結合チェーンの作成完了")
 
-        return rag_chain
-    except Exception as e:
-        print(f"RAGチェーン作成中にエラーが発生: {str(e)}")
-        print("詳細なエラー情報:")
-        traceback.print_exc()
-        raise
+    # 最終的なRAGチェーンを作成
+    print("最終的なRAGチェーンを作成します")
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    print("RAGチェーンの作成完了")
+
+    return rag_chain
 
 
 def query_rag(rag_chain, query):

@@ -1,46 +1,40 @@
 """
 api.py
 
-このスクリプトは、RAG（Retrieval-Augmented Generation）システムのAPIサーバーを提供します。
-FastAPIを使用して、RESTful APIエンドポイントを公開します。
-
-主な機能:
-- RAGシステムへの問い合わせAPIエンドポイント
-- ヘルスチェックエンドポイント
-- Swagger UIによるAPIドキュメント
+このモジュールは、RAG（Retrieval-Augmented Generation）システムのAPIサーバーを提供します。
+FastAPIを使用して、クエリに対する回答を生成するエンドポイントを公開します。
 """
 
 import os
-import traceback
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# 共通ユーティリティをインポート
-from rag_utils import create_rag_chain, load_vector_store, query_rag
+from config import API_HOST, API_PORT, get_embedding_provider, get_llm_provider
+from rag_utils import create_rag_chain
 
 # 環境変数を読み込む
 load_dotenv()
 
-# FastAPIアプリケーションを作成
+# FastAPIアプリケーションの作成
 app = FastAPI(
     title="RAG API",
     description="Retrieval-Augmented Generation APIサーバー",
     version="1.0.0",
 )
 
-# グローバル変数
+# RAGチェーン
 rag_chain = None
 
 
 class QueryRequest(BaseModel):
     """
-    問い合わせリクエストモデル。
+    クエリリクエストモデル。
 
     属性:
-        query (str): ユーザーからの問い合わせ。
+        query (str): ユーザーからのクエリ文字列。
     """
 
     query: str
@@ -48,127 +42,104 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     """
-    問い合わせレスポンスモデル。
+    クエリレスポンスモデル。
 
     属性:
-        answer (str): 問い合わせに対する回答。
-        sources (List[str]): 回答の参照元ドキュメントのリスト。
+        answer (str): 生成された回答。
+        sources (List[str]): 回答の生成に使用されたソースドキュメントのリスト。
     """
 
     answer: str
     sources: List[str]
 
 
-class HealthResponse(BaseModel):
-    """
-    ヘルスチェックレスポンスモデル。
-
-    属性:
-        status (str): サーバーのステータス。
-        version (str): APIのバージョン。
-    """
-
-    status: str
-    version: str
-
-
 @app.on_event("startup")
 async def startup_event():
     """
     アプリケーション起動時に実行される関数。
-
     RAGチェーンを初期化します。
     """
     global rag_chain
+
     try:
         print("RAGチェーンを初期化中...")
-        vector_store = load_vector_store()
-        if not vector_store:
-            print("警告: ベクトルストアの読み込みに失敗しました。APIは正常に動作しません。")
-            return
+        # 環境変数から埋め込みプロバイダーとLLMプロバイダーを取得
+        embedding_provider = get_embedding_provider()
+        llm_provider = get_llm_provider()
+        print(f"使用する埋め込みプロバイダー: {embedding_provider}")
+        print(f"使用するLLMプロバイダー: {llm_provider}")
 
-        rag_chain = create_rag_chain(vector_store)
+        # 埋め込みプロバイダーとLLMプロバイダーを明示的に指定してRAGチェーンを作成
+        rag_chain = create_rag_chain(embedding_provider, llm_provider)
         print("RAGチェーンの初期化完了")
     except Exception as e:
-        print(f"RAGチェーン初期化中にエラーが発生: {str(e)}")
+        print(f"RAGチェーンの初期化中にエラーが発生しました: {e}")
+        import traceback
+
         traceback.print_exc()
 
 
-@app.get("/health", response_model=HealthResponse, tags=["システム"])
+@app.get("/health")
 async def health_check():
     """
     ヘルスチェックエンドポイント。
+    アプリケーションの状態を確認します。
 
-    サーバーの状態を確認するためのエンドポイントです。
-
-    戻り値:
-        HealthResponse: サーバーのステータスとバージョン情報。
+    Returns:
+        dict: アプリケーションの状態を示す辞書。
     """
-    return HealthResponse(status="healthy", version="1.0.0")
+    return {
+        "status": "healthy",
+        "embedding_provider": get_embedding_provider(),
+        "llm_provider": get_llm_provider(),
+    }
 
 
-@app.post("/query", response_model=QueryResponse, tags=["RAG"])
+@app.post("/query", response_model=QueryResponse)
 async def query(request: QueryRequest):
     """
-    RAGシステムへの問い合わせエンドポイント。
+    クエリエンドポイント。
+    ユーザーからのクエリに対して回答を生成します。
 
-    ユーザーからの問い合わせを受け付け、RAGシステムを使用して回答を生成します。
+    Args:
+        request (QueryRequest): クエリリクエスト。
 
-    パラメータ:
-        request (QueryRequest): 問い合わせリクエスト。
+    Returns:
+        QueryResponse: 生成された回答とソースドキュメント。
 
-    戻り値:
-        QueryResponse: 問い合わせに対する回答と参照元。
-
-    例外:
-        HTTPException: RAGチェーンが初期化されていない場合や、
-                      問い合わせ処理中にエラーが発生した場合。
+    Raises:
+        HTTPException: RAGチェーンが初期化されていない場合や、クエリの処理中にエラーが発生した場合。
     """
     global rag_chain
-    if not rag_chain:
-        raise HTTPException(
-            status_code=503,
-            detail="RAGチェーンが初期化されていません。サーバーを再起動してください。",
-        )
+
+    if rag_chain is None:
+        raise HTTPException(status_code=500, detail="RAGチェーンが初期化されていません")
 
     try:
-        print(f"問い合わせを処理中: {request.query}")
-        response = query_rag(rag_chain, request.query)
+        print(f"RAGチェーンに問い合わせを実行します: {request.query}")
+        result = rag_chain.invoke({"input": request.query})
+        print(f"生のレスポンス: {result}")
 
-        # 回答を取得
-        answer = ""
-        if "answer" in response:
-            answer = response["answer"]
-        elif "result" in response:
-            answer = response["result"]
-        else:
-            answer = "回答を生成できませんでした。"
-
-        # ソースを取得
+        # レスポンスからソースを抽出
         sources = []
-        try:
-            source_documents = response.get("context", [])
-            if not source_documents and "documents" in response:
-                source_documents = response.get("documents", [])
+        if "context" in result and result["context"]:
+            for doc in result["context"]:
+                if "source" in doc.metadata:
+                    sources.append(doc.metadata["source"])
 
-            if source_documents:
-                for doc in source_documents:
-                    source = doc.metadata.get("source", "不明")
-                    if source not in sources:
-                        sources.append(source)
-        except Exception as e:
-            print(f"ソース抽出中にエラー: {str(e)}")
-            traceback.print_exc()
+        # 回答を抽出
+        answer = result.get("answer", "回答を生成できませんでした")
 
-        return QueryResponse(answer=answer, sources=sources)
+        return QueryResponse(answer=answer, sources=list(set(sources)))
+
     except Exception as e:
-        print(f"問い合わせ処理中にエラーが発生: {str(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"エラーが発生しました: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"クエリの処理中にエラーが発生しました: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
     import uvicorn
 
     # UvicornでAPIサーバーを起動
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)
