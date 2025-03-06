@@ -13,6 +13,7 @@ HTMLファイルの読み込み、ドキュメントの分割、ベクトルス�
 """
 
 import glob
+import json
 import os
 import time
 import traceback
@@ -353,7 +354,191 @@ def load_vector_store(embedding_provider=None):
     return vector_store
 
 
-def create_rag_chain(embedding_provider=None, llm_provider=None):
+def create_llm(llm_provider=None):
+    """
+    指定されたプロバイダーに基づいてLLMを作成します。
+
+    Args:
+        llm_provider (str, optional): 使用するLLMプロバイダー
+
+    Returns:
+        BaseChatModel: 初期化されたLLMインスタンス
+    """
+    if llm_provider is None:
+        llm_provider = get_llm_provider()
+
+    print(f"LLMプロバイダー: {llm_provider}")
+
+    try:
+        if llm_provider.lower() == "openai":
+            # OpenAI APIキーを確認
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if not openai_api_key:
+                print("OpenAI APIキーが設定されていません")
+                return None
+
+            # OpenAI LLMを作成
+            return ChatOpenAI(
+                model="gpt-3.5-turbo",
+                temperature=0.7,
+            )
+        else:
+            print(f"未サポートのLLMプロバイダー: {llm_provider}")
+            return None
+    except Exception as e:
+        print(f"LLMの作成中にエラーが発生しました: {str(e)}")
+        return None
+
+
+class ConversationMemory:
+    """
+    会話履歴を管理するクラス。
+    ユーザーの質問とシステムの回答を保存し、会話のコンテキストを維持します。
+    """
+
+    def __init__(self, max_history: int = 5):
+        """
+        ConversationMemoryを初期化します。
+
+        Args:
+            max_history (int): 保持する会話履歴の最大数
+        """
+        self.history = []
+        self.max_history = max_history
+
+    def add_interaction(self, user_query: str, system_response: Dict[str, Any]):
+        """
+        ユーザーの質問とシステムの回答を履歴に追加します。
+
+        Args:
+            user_query (str): ユーザーからの質問
+            system_response (Dict[str, Any]): システムの回答（RAGチェーンの出力）
+        """
+        # system_responseから必要な情報を抽出
+        answer = system_response.get("answer", "")
+
+        # 履歴に追加する情報を整理
+        self.history.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "user_query": user_query,
+                "system_response": {
+                    "answer": answer,
+                    # 他の必要なフィールドがあれば追加
+                },
+            }
+        )
+
+        # 履歴が最大数を超えた場合、古いものから削除
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history :]
+
+    def get_formatted_history(self) -> str:
+        """
+        会話履歴をフォーマットして文字列として返します。
+
+        Returns:
+            str: フォーマットされた会話履歴
+        """
+        if not self.history:
+            return ""
+
+        formatted = "以下は過去の会話履歴です：\n\n"
+        for i, interaction in enumerate(self.history):
+            formatted += f"質問 {i+1}: {interaction['user_query']}\n"
+
+            # system_responseが辞書型かどうかを確認
+            if isinstance(interaction["system_response"], dict):
+                answer = interaction["system_response"].get("answer", "")
+            else:
+                # 古い形式の場合の対応
+                answer = str(interaction["system_response"])
+
+            formatted += f"回答 {i+1}: {answer}\n\n"
+
+        return formatted
+
+    def save_to_file(self, filename: str = "conversation_history.json"):
+        """
+        会話履歴をJSONファイルに保存します。
+
+        Args:
+            filename (str): 保存するファイル名
+        """
+        # 履歴がない場合は保存しない
+        if not self.history:
+            print("保存する会話履歴がありません")
+            return False
+
+        # JSONシリアライズ可能な形式に変換
+        serializable_history = []
+        for interaction in self.history:
+            # system_responseの処理
+            if isinstance(interaction["system_response"], dict):
+                system_response = {"answer": interaction["system_response"].get("answer", "")}
+            else:
+                # 古い形式の場合の対応
+                system_response = {"answer": str(interaction["system_response"])}
+
+            serializable_interaction = {
+                "timestamp": interaction["timestamp"],
+                "user_query": interaction["user_query"],
+                "system_response": system_response,
+            }
+            serializable_history.append(serializable_interaction)
+
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(serializable_history, f, ensure_ascii=False, indent=2)
+            print(f"会話履歴を {filename} に保存しました（{len(serializable_history)}件）")
+            return True
+        except Exception as e:
+            print(f"会話履歴の保存中にエラーが発生しました: {str(e)}")
+            return False
+
+    def load_from_file(self, filename: str = "conversation_history.json") -> bool:
+        """
+        JSONファイルから会話履歴を読み込みます。
+
+        Args:
+            filename (str): 読み込むファイル名
+
+        Returns:
+            bool: 読み込みに成功した場合はTrue、失敗した場合はFalse
+        """
+        try:
+            if not os.path.exists(filename):
+                print(f"ファイル {filename} が見つかりません")
+                return False
+
+            with open(filename, "r", encoding="utf-8") as f:
+                loaded_history = json.load(f)
+
+            # 読み込んだデータの検証
+            if not isinstance(loaded_history, list):
+                print(f"無効な会話履歴形式: リストではありません")
+                return False
+
+            for item in loaded_history:
+                if not isinstance(item, dict):
+                    print(f"無効な会話履歴形式: 項目が辞書ではありません")
+                    return False
+                if "user_query" not in item or "system_response" not in item:
+                    print(f"無効な会話履歴形式: 必須フィールドがありません")
+                    return False
+
+            self.history = loaded_history
+            print(f"{filename} から会話履歴を読み込みました（{len(self.history)}件）")
+            return True
+        except json.JSONDecodeError as e:
+            print(f"JSONデコードエラー: {str(e)}")
+            return False
+        except Exception as e:
+            print(f"会話履歴の読み込み中にエラーが発生しました: {str(e)}")
+            return False
+
+
+def create_rag_chain(embedding_provider=None, llm_provider=None, memory=None):
     """
     RAGチェーンを作成します。
 
@@ -362,6 +547,7 @@ def create_rag_chain(embedding_provider=None, llm_provider=None):
             Noneの場合は、get_embedding_provider()の値を使用します。
         llm_provider (str, optional): 使用するLLMプロバイダー。
             Noneの場合は、get_llm_provider()の値を使用します。
+        memory (ConversationMemory, optional): 会話履歴を管理するメモリオブジェクト
 
     戻り値:
         Chain: 作成されたRAGチェーン
@@ -377,69 +563,97 @@ def create_rag_chain(embedding_provider=None, llm_provider=None):
     # ベクトルストアを読み込む
     vector_store = load_vector_store(embedding_provider)
     if vector_store is None:
-        raise ValueError("ベクトルストアの読み込みに失敗しました")
+        print("ベクトルストアの読み込みに失敗しました。")
+        return None
 
     # リトリーバーを作成
-    print("リトリーバーを作成します")
-    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+    print("リトリーバーを作成中...")
+    retriever = vector_store.as_retriever(search_kwargs={"k": 5})
     print("リトリーバーの作成完了")
 
     # LLMを初期化
-    print(f"{llm_provider}モデルを初期化します")
-    llm = ChatOpenAI()
-    print(f"{llm_provider}モデルの初期化完了")
+    print(f"LLMを初期化中... (プロバイダー: {llm_provider})")
+    llm = create_llm(llm_provider)
+    if llm is None:
+        print("LLMの初期化に失敗しました。")
+        return None
+    print("LLMの初期化完了")
 
     # プロンプトテンプレートを作成
-    print("プロンプトテンプレートを作成します")
-    prompt = ChatPromptTemplate.from_template(
-        """
-        あなたは親切なアシスタントです。以下の情報を元に質問に答えてください。
-        
-        コンテキスト情報:
-        {context}
-        
-        質問: {input}
-        
-        回答:
-        """
+    print("プロンプトテンプレートを作成中...")
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """あなたは親切で丁寧な日本語アシスタントです。
+以下の情報源を使用して、ユーザーの質問に答えてください。
+情報源に基づいて回答し、情報源にない内容は含めないでください。
+
+{context}
+
+会話の文脈を考慮して回答してください。ユーザーが前の会話を参照している場合は、
+その文脈を理解した上で回答してください。例えば「それはどういう意味ですか？」
+「もっと詳しく教えてください」などの質問には、前の回答の内容を踏まえて詳細に説明してください。
+
+会話履歴:
+{conversation_history}
+""",
+            ),
+            ("human", "{input}"),
+        ]
     )
     print("プロンプトテンプレートの作成完了")
 
     # ドキュメント結合チェーンを作成
-    print("ドキュメント結合チェーンを作成します")
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    print("ドキュメント結合チェーンを作成中...")
+    document_chain = create_stuff_documents_chain(llm, prompt)
     print("ドキュメント結合チェーンの作成完了")
 
-    # 最終的なRAGチェーンを作成
-    print("最終的なRAGチェーンを作成します")
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    # RAGチェーンを作成
+    rag_chain = create_retrieval_chain(retriever, document_chain)
     print("RAGチェーンの作成完了")
 
     return rag_chain
 
 
-def query_rag(rag_chain, query):
+def query_rag(rag_chain, query, memory=None):
     """
-    RAGチェーンで問い合わせを実行する関数。
-
-    指定されたRAGチェーンを使用して、ユーザーからの問い合わせに応答します。
+    RAGチェーンを使用してクエリを実行します。
 
     パラメータ:
-        rag_chain (RetrievalChain): 使用するRAGチェーン。
-        query (str): ユーザーからの問い合わせ。
+        rag_chain (Chain): 使用するRAGチェーン
+        query (str): 実行するクエリ
+        memory (ConversationMemory, optional): 会話履歴を管理するメモリオブジェクト
 
     戻り値:
-        dict: RAGチェーンからの応答。
+        dict: RAGチェーンからの応答
     """
-    print(f"RAGチェーンに問い合わせを実行します: {query}")
+    print(f"クエリを実行中: {query}")
     try:
-        response = rag_chain.invoke({"input": query})
-        print("生のレスポンス:", response)
+        # 会話履歴がある場合は、それを含める
+        input_data = {"input": query}
+
+        if memory and memory.history:
+            formatted_history = memory.get_formatted_history()
+            input_data["conversation_history"] = formatted_history
+        else:
+            # 会話履歴がない場合は空の文字列を設定
+            input_data["conversation_history"] = ""
+
+        print(f"入力データ: {input_data}")
+        response = rag_chain.invoke(input_data)
+
+        # 会話履歴に追加
+        if memory:
+            memory.add_interaction(query, response)
+
         return response
     except Exception as e:
-        print(f"query_rag内でエラーが発生: {str(e)}")
+        print(f"エラーが発生しました: {str(e)}")
+        import traceback
+
         traceback.print_exc()
-        raise  # 元の例外を再度スローして、呼び出し元で処理できるようにする
+        return {"answer": f"エラーが発生しました: {str(e)}"}
 
 
 def print_document_sources(response):
