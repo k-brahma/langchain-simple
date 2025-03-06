@@ -78,3 +78,16 @@ def set_llm_provider(provider):
         raise ValueError("現在サポートされているLLMプロバイダーは 'openai' のみです")
 
     os.environ["LLM_PROVIDER"] = provider
+
+
+def is_cohere_trial():
+    """
+    Cohereの無料トライアルキーを使用しているかどうかを確認します。
+    環境変数 IS_COHERE_TRIAL が設定されている場合はその値を、
+    そうでない場合はデフォルト値（True）を返します。
+
+    Returns:
+        bool: Cohereの無料トライアルキーを使用している場合はTrue、そうでない場合はFalse
+    """
+    trial_setting = os.getenv("IS_COHERE_TRIAL", "true").lower()
+    return trial_setting == "true"

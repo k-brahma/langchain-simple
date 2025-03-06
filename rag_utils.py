@@ -14,8 +14,10 @@ HTMLファイルの読み込み、ドキュメントの分割、ベクトルス�
 
 import glob
 import os
+import time
 import traceback
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -26,6 +28,9 @@ from langchain.schema.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_cohere import CohereEmbeddings
+from langchain_community.embeddings import CohereEmbeddings, OpenAIEmbeddings
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 # 設定を読み込む
@@ -36,6 +41,7 @@ from config import (
     HTML_DATA_DIRECTORY,
     get_embedding_provider,
     get_llm_provider,
+    is_cohere_trial,
 )
 
 # 環境変数を読み込む
@@ -115,26 +121,36 @@ def load_html_files(html_files=None):
     HTMLファイルを読み込み、ドキュメントのリストを返します。
 
     Args:
-        html_files (list, optional): 読み込むHTMLファイルのパスのリスト。
-            指定されない場合は、HTML_DATA_DIRECTORYから全てのHTMLファイルを読み込みます。
+        html_files (list, optional): 読み込むHTMLファイルのリスト。
+            Noneの場合は、デフォルトのディレクトリからすべてのHTMLファイルを読み込みます。
 
     Returns:
-        list: Documentオブジェクトのリスト
+        list: ドキュメントのリスト
     """
     if html_files is None:
-        # ディレクトリ内の全てのHTMLファイルを取得
-        html_files = glob.glob(os.path.join(HTML_DATA_DIRECTORY, "*.html"))
+        # デフォルトのディレクトリからHTMLファイルを検索
+        html_files = glob.glob(os.path.join(HTML_DATA_DIRECTORY, "**/*.html"), recursive=True)
+
+    print(f"検出されたHTMLファイル数: {len(html_files)}")
+    print(f"検出されたファイルリスト: {', '.join(html_files)}")
 
     documents = []
+    embedding_provider = get_embedding_provider()
+
     for file_path in html_files:
         print(f"処理開始: {file_path}")
         loader = CustomHTMLLoader(file_path)
-        doc = loader.load()
-        if doc:
-            documents.extend(doc)
-            print(
-                f"読み込み完了: {os.path.basename(file_path)} から {len(doc)} 件のドキュメントを読み込みました"
-            )
+        docs = loader.load()
+        documents.extend(docs)
+        print(
+            f"読み込み完了: {os.path.basename(file_path)} から {len(docs)} 件のドキュメントを読み込みました"
+        )
+
+        # Cohereの場合はレート制限対策として遅延を入れる
+        if embedding_provider == "cohere" and len(html_files) > 1:
+            delay_time = 1  # 一律1秒の遅延時間
+            print(f"Cohereのレート制限対策として{delay_time}秒間待機します...")
+            time.sleep(delay_time)
 
     return documents
 
@@ -196,15 +212,16 @@ def create_embeddings(embedding_provider=None):
     elif embedding_provider == "cohere":
         # Cohere埋め込みを使用
         try:
-            # まず、シンプルな初期化を試みる
+            # Cohereの埋め込みを初期化
             embeddings = CohereEmbeddings(
-                cohere_api_key=os.getenv("COHERE_API_KEY"),
                 model="embed-multilingual-v3.0",  # モデルを指定
+                client=None,
+                async_client=None,
             )
-        except TypeError:
-            # 引数が足りない場合は、client, async_clientを追加
+        except Exception as e:
+            print(f"Cohere埋め込み初期化エラー: {e}")
+            # フォールバック方法
             embeddings = CohereEmbeddings(
-                cohere_api_key=os.getenv("COHERE_API_KEY"),
                 model="embed-multilingual-v3.0",  # モデルを指定
                 client=None,
                 async_client=None,
@@ -231,11 +248,72 @@ def create_vector_store(chunks, embedding_provider=None):
     # 埋め込みを作成
     embeddings = create_embeddings(embedding_provider)
 
-    # ベクトルストアを作成
-    print(f"Chromaベクトルストアを作成中... ({len(chunks)} チャンク)")
-    vector_store = Chroma.from_documents(
-        documents=chunks, embedding=embeddings, persist_directory=CHROMA_DIRECTORY
-    )
+    # Cohereのレート制限対策として、チャンクを小さなバッチに分割して処理
+    if (
+        embedding_provider == "cohere"
+        or (embedding_provider is None and get_embedding_provider() == "cohere")
+    ) and is_cohere_trial():
+        print("Cohereの無料トライアルキーを使用しているため、レート制限対策を適用します")
+        batch_size = 5  # 一度に処理するチャンク数
+        all_chunks = chunks.copy()
+        processed_chunks = []
+        total_tokens = 0
+
+        for i in range(0, len(all_chunks), batch_size):
+            batch = all_chunks[i : i + batch_size]
+            print(
+                f"バッチ処理中: {i+1}〜{min(i+batch_size, len(all_chunks))}/{len(all_chunks)}チャンク"
+            )
+
+            # バッチのトークン数を概算（1文字あたり約0.3トークンと仮定）
+            batch_text = " ".join([chunk.page_content for chunk in batch])
+            estimated_tokens = len(batch_text) * 0.3
+            print(f"バッチの推定トークン数: 約{int(estimated_tokens)}トークン")
+            total_tokens += estimated_tokens
+
+            # 処理開始時間を記録
+            batch_start_time = time.time()
+
+            # 小さなバッチでベクトルストアを作成
+            if i == 0:
+                # 最初のバッチでベクトルストアを初期化
+                vector_store = Chroma.from_documents(
+                    documents=batch, embedding=embeddings, persist_directory=CHROMA_DIRECTORY
+                )
+                processed_chunks.extend(batch)
+            else:
+                # 既存のベクトルストアに追加
+                vector_store = Chroma(
+                    persist_directory=CHROMA_DIRECTORY, embedding_function=embeddings
+                )
+                vector_store.add_documents(documents=batch)
+                processed_chunks.extend(batch)
+
+            # 処理時間を計算
+            batch_time = time.time() - batch_start_time
+            print(f"バッチ処理時間: {batch_time:.2f}秒")
+            print(f"1トークンあたりの処理時間: {(batch_time / estimated_tokens) * 1000:.2f}ミリ秒")
+
+            # バッチ間に遅延を追加
+            if i + batch_size < len(all_chunks):
+                delay_time = 1  # 一律1秒の遅延時間
+
+                print(f"次のバッチ処理前に{delay_time}秒間待機します...")
+                time.sleep(delay_time)
+
+        print(f"全{len(processed_chunks)}チャンクの処理が完了しました")
+        print(f"総推定トークン数: 約{int(total_tokens)}トークン")
+    else:
+        # 通常の処理（OpenAIまたはCohere有料プラン）
+        if embedding_provider == "cohere" or (
+            embedding_provider is None and get_embedding_provider() == "cohere"
+        ):
+            print("Cohereの有料プランを使用しているため、レート制限対策を適用しません")
+
+        print(f"Chromaベクトルストアを作成中... ({len(chunks)} チャンク)")
+        vector_store = Chroma.from_documents(
+            documents=chunks, embedding=embeddings, persist_directory=CHROMA_DIRECTORY
+        )
 
     # ベクトルストアを保存
     print("ベクトルストアを保存中...")
